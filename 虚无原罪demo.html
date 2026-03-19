@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>NPC 任务模型 - 修复版</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #eef2f3; font-family: "Microsoft YaHei", sans-serif; }
+        #game-world { width: 100vw; height: 100vh; position: relative; background: #eef2f3; }
+        
+        /* NPC 容器（负责移动和定位） */
+        .npc {
+            width: 60px; height: 60px;
+            position: absolute; display: flex; justify-content: center; align-items: center;
+            z-index: 5;
+        }
+
+        /* NPC 身体（负责视觉：圆球、五边形、颜色） */
+        .npc-body {
+            width: 100%; height: 100%;
+            background: #3498db; border-radius: 50%;
+            transition: all 0.5s ease;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+
+        /* --- 【五边形黑气样式】 --- */
+        .empty-mode .npc-body {
+            background: #1a1a1a !important;
+            border-radius: 0% !important;
+            /* 关键：只给身体加裁剪，不影响文字框 */
+            clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
+            filter: drop-shadow(0 0 15px #000);
+        }
+
+        /* 黑气冒烟动画 */
+        .empty-mode {
+            animation: smokeAnim 1.5s infinite alternate, floatAnim 2s infinite ease-in-out;
+        }
+
+        @keyframes smokeAnim {
+            0% { filter: drop-shadow(0 0 5px #000); }
+            100% { filter: drop-shadow(0 -10px 20px #000); }
+        }
+
+        /* 文字气泡：现在它在裁剪范围之外，可见了 */
+        .bubble {
+            position: absolute; bottom: 85px; width: 160px;
+            background: white; padding: 10px; border-radius: 12px;
+            border: 2px solid #333; font-size: 13px; text-align: center;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            pointer-events: none; z-index: 10;
+        }
+        .bubble::after {
+            content: ''; position: absolute; bottom: -10px; left: 50%;
+            transform: translateX(-50%);
+            border-left: 8px solid transparent; border-right: 8px solid transparent;
+            border-top: 10px solid #333;
+        }
+
+        /* 互动按钮 */
+        .interact-btn {
+            position: absolute; top: -50px;
+            background: #ff4757; color: white; border: 2px solid #fff;
+            padding: 6px 12px; cursor: pointer; border-radius: 20px;
+            font-weight: bold; white-space: nowrap; z-index: 20;
+            box-shadow: 0 4px 10px rgba(255, 71, 87, 0.4);
+        }
+
+        @keyframes floatAnim {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-20px); }
+        }
+
+        .name-label { position: absolute; bottom: -25px; color: #7f8c8d; font-size: 12px; white-space: nowrap; }
+    </style>
+</head>
+<body>
+
+<div id="game-world"></div>
+
+<script>
+    const API_KEY = "ca1614ca-5afe-427f-83c4-e0e7d7c79c43"; 
+    const ENDPOINT_ID = "doubao-1-5-pro-32k-250115"; 
+
+    const world = document.getElementById('game-world');
+    let npcs = [];
+
+    async function getAIResponse(state, customPrompt = "") {
+        const prompt = customPrompt || `你是一个游戏里的NPC，你现在的状态是【${state}】。请说一句符合心情的简短心里话，不要超过15个字。`;
+        try {
+            const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: ENDPOINT_ID,
+                    messages: [
+                        { role: "system", content: "你是一个游戏NPC对话助手。" },
+                        { role: "user", content: prompt }
+                    ]
+                })
+            });
+            const data = await response.json();
+            return data.choices[0].message.content;
+        } catch (e) {
+            return "（意识模糊...）";
+        }
+    }
+
+    function createNPC(id) {
+        const el = document.createElement('div');
+        el.className = 'npc';
+        // 核心改变：增加了 npc-body 这个子层
+        el.innerHTML = `
+            <div class="bubble" id="bubble-${id}">连接中...</div>
+            <div id="btn-container-${id}"></div>
+            <div class="npc-body" id="body-${id}"></div>
+            <div class="name-label">NPC ${id+1}</div>
+        `;
+
+        const npcObj = {
+            id: id,
+            el: el,
+            body: el.querySelector('.npc-body'),
+            x: Math.random() * (window.innerWidth - 100) + 50,
+            y: Math.random() * (window.innerHeight - 100) + 50,
+            dx: (Math.random() - 0.5) * 2,
+            dy: (Math.random() - 0.5) * 2,
+            state: "高兴",
+            isFrozen: false,
+            hasBeenEmpty: false
+        };
+
+        world.appendChild(el);
+        npcs.push(npcObj);
+        refreshDialogue(npcObj);
+        setInterval(() => updateLogic(npcObj), 6000);
+    }
+
+    async function updateLogic(npc) {
+        if (npc.isFrozen) return;
+        let rand = Math.random();
+        if (rand < 0.25 && !npc.hasBeenEmpty) {
+            triggerEmptyQuest(npc);
+        } else {
+            npc.state = Math.random() > 0.5 ? "高兴" : "难过";
+            refreshDialogue(npc);
+        }
+    }
+
+    async function refreshDialogue(npc, customPrompt) {
+        const bubble = document.getElementById(`bubble-${npc.id}`);
+        if (npc.state === "高兴") npc.body.style.background = "#f1c40f";
+        else if (npc.state === "难过") npc.body.style.background = "#3498db";
+
+        const text = await getAIResponse(npc.state, customPrompt);
+        bubble.innerText = text;
+    }
+
+    function triggerEmptyQuest(npc) {
+        npc.state = "空虚";
+        npc.isFrozen = true;
+        
+        // 视觉：变五边形+黑气
+        npc.el.classList.add('empty-mode');
+        refreshDialogue(npc);
+
+        const btnContainer = document.getElementById(`btn-container-${npc.id}`);
+        const btn = document.createElement('button');
+        btn.className = 'interact-btn';
+        btn.innerText = '⚒️ 扔出铁镐 (互动)';
+        
+        btn.onclick = async () => {
+            const bubble = document.getElementById(`bubble-${npc.id}`);
+            bubble.innerText = "💥 正在驱散黑气...";
+            
+            const thanksText = await getAIResponse("高兴", "我刚才变空虚成黑气怪了，谢谢你建议我去种地/钓鱼救了我。请说一句感激的话。");
+            bubble.innerText = thanksText;
+            
+            setTimeout(() => {
+                npc.el.classList.remove('empty-mode');
+                npc.isFrozen = false;
+                npc.hasBeenEmpty = true;
+                npc.state = "高兴";
+                btn.remove();
+            }, 3500);
+        };
+        btnContainer.appendChild(btn);
+    }
+
+    function animate() {
+        npcs.forEach(npc => {
+            if (!npc.isFrozen) {
+                npc.x += npc.dx;
+                npc.y += npc.dy;
+                if (npc.x <= 20 || npc.x >= window.innerWidth - 80) npc.dx *= -1;
+                if (npc.y <= 20 || npc.y >= window.innerHeight - 80) npc.dy *= -1;
+                npc.el.style.left = npc.x + 'px';
+                npc.el.style.top = npc.y + 'px';
+            }
+        });
+        requestAnimationFrame(animate);
+    }
+
+    for (let i = 0; i < 3; i++) createNPC(i);
+    animate();
+</script>
+</body>
+</html>
