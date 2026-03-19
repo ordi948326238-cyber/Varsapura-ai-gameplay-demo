@@ -2,11 +2,36 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>NPC 任务模型 - 修复版</title>
+    <title>NPC 状态驱动任务模型 - Varsapura 预研</title>
     <style>
         body { margin: 0; overflow: hidden; background: #eef2f3; font-family: "Microsoft YaHei", sans-serif; }
-        #game-world { width: 100vw; height: 100vh; position: relative; background: #eef2f3; }
+        #game-world { width: 100vw; height: 100vh; position: relative; background: #eef2f3; display: none; } /* 初始隐藏游戏世界 */
         
+        /* --- 【安全验证弹窗 UI】 --- */
+        #auth-overlay {
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(44, 62, 80, 0.95);
+            display: flex; justify-content: center; align-items: center;
+            z-index: 1000; flex-direction: column;
+        }
+        .auth-box {
+            background: white; padding: 40px; border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3); text-align: center; max-width: 400px;
+        }
+        .auth-box h2 { margin-top: 0; color: #2c3e50; font-size: 22px; }
+        .auth-box p { color: #7f8c8d; font-size: 14px; margin-bottom: 25px; line-height: 1.6; }
+        .auth-box input {
+            width: 100%; padding: 12px; margin-bottom: 20px;
+            border: 2px solid #bdc3c7; border-radius: 6px; box-sizing: border-box;
+            font-size: 14px; font-family: monospace;
+        }
+        .auth-box button {
+            background: #3498db; color: white; border: none;
+            padding: 12px 30px; border-radius: 6px; font-size: 16px;
+            cursor: pointer; font-weight: bold; transition: background 0.3s;
+        }
+        .auth-box button:hover { background: #2980b9; }
+
         /* NPC 容器（负责移动和定位） */
         .npc {
             width: 60px; height: 60px;
@@ -26,22 +51,17 @@
         .empty-mode .npc-body {
             background: #1a1a1a !important;
             border-radius: 0% !important;
-            /* 关键：只给身体加裁剪，不影响文字框 */
             clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
             filter: drop-shadow(0 0 15px #000);
         }
 
-        /* 黑气冒烟动画 */
-        .empty-mode {
-            animation: smokeAnim 1.5s infinite alternate, floatAnim 2s infinite ease-in-out;
-        }
+        .empty-mode { animation: smokeAnim 1.5s infinite alternate, floatAnim 2s infinite ease-in-out; }
 
         @keyframes smokeAnim {
             0% { filter: drop-shadow(0 0 5px #000); }
             100% { filter: drop-shadow(0 -10px 20px #000); }
         }
 
-        /* 文字气泡：现在它在裁剪范围之外，可见了 */
         .bubble {
             position: absolute; bottom: 85px; width: 160px;
             background: white; padding: 10px; border-radius: 12px;
@@ -56,7 +76,6 @@
             border-top: 10px solid #333;
         }
 
-        /* 互动按钮 */
         .interact-btn {
             position: absolute; top: -50px;
             background: #ff4757; color: white; border: 2px solid #fff;
@@ -70,20 +89,70 @@
             50% { transform: translateY(-20px); }
         }
 
-        .name-label { position: absolute; bottom: -25px; color: #7f8c8d; font-size: 12px; white-space: nowrap; }
+        .name-label { position: absolute; bottom: -25px; color: #7f8c8d; font-size: 12px; white-space: nowrap; font-weight: bold; }
+        .clear-key-btn { position: fixed; bottom: 10px; right: 10px; padding: 5px 10px; font-size: 12px; background: #95a5a6; color: white; border: none; border-radius: 4px; cursor: pointer; z-index: 100; }
     </style>
 </head>
 <body>
 
+<div id="auth-overlay">
+    <div class="auth-box">
+        <h2>系统接入许可验证</h2>
+        <p>为保护数据安全及防止恶意调用，请输入您的火山引擎(Doubao) API Key 以启动 AI 逻辑回路。<br><span style="font-size: 12px; color: #bdc3c7;">(Key 仅保存在您的浏览器本地，不会上传至任何第三方服务器)</span></p>
+        <input type="password" id="api-key-input" placeholder="输入 sk-... 格式的 API Key">
+        <button onclick="verifyAndStart()">建立神经连接</button>
+    </div>
+</div>
+
+<button class="clear-key-btn" onclick="clearApiKey()" style="display: none;" id="clear-btn">断开连接 (清除本地 Key)</button>
+
 <div id="game-world"></div>
 
 <script>
-    const API_KEY = ""; 
+    // 将 API_KEY 设为动态变量
+    let API_KEY = ""; 
     const ENDPOINT_ID = "doubao-1-5-pro-32k-250115"; 
 
     const world = document.getElementById('game-world');
     let npcs = [];
+    let gameLoop;
 
+    // --- 【权限验证逻辑】 ---
+    window.onload = () => {
+        const savedKey = localStorage.getItem("varsapura_demo_key");
+        if (savedKey) {
+            API_KEY = savedKey;
+            startGame();
+        }
+    };
+
+    function verifyAndStart() {
+        const input = document.getElementById('api-key-input').value.trim();
+        if (!input) {
+            alert("请输入有效的 API Key 才能启动引擎。");
+            return;
+        }
+        API_KEY = input;
+        localStorage.setItem("varsapura_demo_key", API_KEY); // 存入本地缓存
+        startGame();
+    }
+
+    function clearApiKey() {
+        localStorage.removeItem("varsapura_demo_key");
+        location.reload(); // 刷新页面重新要求输入
+    }
+
+    // --- 【核心游戏逻辑初始化】 ---
+    function startGame() {
+        document.getElementById('auth-overlay').style.display = 'none';
+        document.getElementById('game-world').style.display = 'block';
+        document.getElementById('clear-btn').style.display = 'block';
+
+        for (let i = 0; i < 3; i++) createNPC(i);
+        animate();
+    }
+
+    // --- 【大模型调用逻辑】 ---
     async function getAIResponse(state, customPrompt = "") {
         const prompt = customPrompt || `你是一个游戏里的NPC，你现在的状态是【${state}】。请说一句符合心情的简短心里话，不要超过15个字。`;
         try {
@@ -101,9 +170,21 @@
                     ]
                 })
             });
+            
+            // 处理 Key 错误或欠费的情况
+            if (!response.ok) {
+                if (response.status === 401) {
+                    clearApiKey();
+                    alert("API Key 无效或已过期，系统已自动断开连接，请重新输入。");
+                    return "（神经连接断开...）";
+                }
+                throw new Error("API 请求失败");
+            }
+            
             const data = await response.json();
             return data.choices[0].message.content;
         } catch (e) {
+            console.error(e);
             return "（意识模糊...）";
         }
     }
@@ -111,12 +192,11 @@
     function createNPC(id) {
         const el = document.createElement('div');
         el.className = 'npc';
-        // 核心改变：增加了 npc-body 这个子层
         el.innerHTML = `
-            <div class="bubble" id="bubble-${id}">连接中...</div>
+            <div class="bubble" id="bubble-${id}">正在接入意识...</div>
             <div id="btn-container-${id}"></div>
             <div class="npc-body" id="body-${id}"></div>
-            <div class="name-label">NPC ${id+1}</div>
+            <div class="name-label">游荡者 ${id+1}</div>
         `;
 
         const npcObj = {
@@ -162,20 +242,19 @@
         npc.state = "空虚";
         npc.isFrozen = true;
         
-        // 视觉：变五边形+黑气
         npc.el.classList.add('empty-mode');
         refreshDialogue(npc);
 
         const btnContainer = document.getElementById(`btn-container-${npc.id}`);
         const btn = document.createElement('button');
         btn.className = 'interact-btn';
-        btn.innerText = '⚒️ 扔出铁镐 (互动)';
+        btn.innerText = '⚒️ 扔出铁镐 (打破循环)';
         
         btn.onclick = async () => {
             const bubble = document.getElementById(`bubble-${npc.id}`);
-            bubble.innerText = "💥 正在驱散黑气...";
+            bubble.innerText = "💥 正在重构底层逻辑...";
             
-            const thanksText = await getAIResponse("高兴", "我刚才变空虚成黑气怪了，谢谢你建议我去种地/钓鱼救了我。请说一句感激的话。");
+            const thanksText = await getAIResponse("高兴", "我刚才陷入了无意义的空虚循环变成了黑气怪物，谢谢你向我扔出铁镐，用物理互动帮我找回了状态。请说一句感激的话，带点废土或赛博朋克的口吻。");
             bubble.innerText = thanksText;
             
             setTimeout(() => {
@@ -200,11 +279,8 @@
                 npc.el.style.top = npc.y + 'px';
             }
         });
-        requestAnimationFrame(animate);
+        gameLoop = requestAnimationFrame(animate);
     }
-
-    for (let i = 0; i < 3; i++) createNPC(i);
-    animate();
 </script>
 </body>
 </html>
